@@ -13,7 +13,11 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "AI Master Backend Engine V5 (FFmpeg Fix) is Running!"}
+    return {"status": "AI Master Backend Engine V6 (Even Number Fix) is Running!"}
+
+# မဂဏန်းများကို စုံကိန်း (Even Number) အဖြစ် အလိုအလျောက် ပြောင်းပေးမည့် Function
+def make_even(n):
+    return int(n) // 2 * 2
 
 @app.post("/render")
 async def render_video(
@@ -39,45 +43,36 @@ async def render_video(
         f.write(await video.read())
 
     try:
-        # ၁။ Canvas Ratio သတ်မှတ်ခြင်း (W:H)
         w, h = 720, 1280
         if ratio == "16:9": w, h = 1280, 720
         elif ratio == "1:1": w, h = 1080, 1080
 
-        # ၂။ Color, Flip သတ်မှတ်ခြင်း
         color_filter = f"eq=brightness={(bri-100)/100.0}:contrast={con/100.0}:saturation={sat/100.0}"
         flip_filter = "hflip," if flip.lower() == "true" else ""
         
-        # ၃။ Background Blur အတွက် Filter
-        # video ကို ပထမဆုံး w, h အတိုင်း scale လုပ်ပြီး crop ပြီးမှ blur လုပ်မည်
         bg_filter = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=15:15"
         
-        # ၄။ Foreground (Inner Crop & Zoom) အတွက် Filter တွက်ချက်ခြင်း
         fg_crop_filter = ""
         if inner_crop != "none":
-            # Crop ratio များကို FFmpeg နားလည်သော ပုံစံဖြင့် ရေးသားခြင်း
             if inner_crop == "3:4": fg_crop_filter = "crop=ih*3/4:ih,"
-            elif inner_crop == "16:9": fg_crop_filter = "crop=ih*16/9:ih," # 16:9 တွက်ချက်မှု ပြင်ဆင်ထားသည်
+            elif inner_crop == "16:9": fg_crop_filter = "crop=ih*16/9:ih,"
             elif inner_crop == "1:1": fg_crop_filter = "crop=min(iw\\,ih):min(iw\\,ih),"
             elif inner_crop == "4:5": fg_crop_filter = "crop=ih*4/5:ih,"
             elif inner_crop == "9:16": fg_crop_filter = "crop=ih*9/16:ih,"
 
-        # Foreground ၏ အရွယ်အစားကို W နှင့် H အတိုင်း Scale လုပ်ပြီး Zoom ဖြင့် ထပ်မံမြှောက်သည်
-        # ကိန်းပြည့်ဖြစ်စေရန် int() သုံးထားသည်
-        fg_w = int(w * zoom)
-        fg_h = int(h * zoom)
+        # Zoom တွက်ချက်မှုကြောင့် ထွက်လာမည့် Pixels များကို စုံကိန်းဖြစ်အောင် ထိန်းပေးခြင်း
+        fg_w = make_even(w * zoom)
+        fg_h = make_even(h * zoom)
         
-        # အရွယ်အစားကို W နှင့် H အချိုးအစားအတိုင်း အရင် Scale လုပ်ပြီးမှ Crop လုပ်သည်
         fg_filter = f"{flip_filter}{color_filter},{fg_crop_filter}scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease"
         
-        # ၅။ Blur Position တွက်ချက်ခြင်း (ကိန်းပြည့်ဖြစ်ရန် int() သုံးထားသည်)
+        # Blur ဧရိယာ တွက်ချက်မှုကို စုံကိန်းဖြစ်အောင် ထိန်းပေးခြင်း
         bY = int((blur_pos / 100.0) * h)
-        bH = int(blur_height)
-        bTop = max(0, bY - (bH // 2))
-        safe_pan = int(pan_y)
+        bH = make_even(blur_height)
+        bTop = make_even(max(0, bY - (bH // 2)))
+        safe_pan = make_even(pan_y)
 
-        # ၆။ FFmpeg Filter Complex အပြည့်အစုံ
-        # eval=frame ကို ရှောင်ရှားရန် overlay တွက်ချက်မှုကို ပြင်ဆင်ထားသည်
+        # format=yuv420p ကို ထည့်သွင်းပေးခြင်းဖြင့် FFmpeg အရောင်စနစ် Error မတက်စေရန် ကာကွယ်ခြင်း
         filter_complex = (
             f"[0:v]split=2[bg_src][fg_src];"
             f"[bg_src]{bg_filter}[bg];"
@@ -85,10 +80,9 @@ async def render_video(
             f"[bg][fg]overlay=(W-w)/2:((H-h)/2)+({safe_pan})[merged];"
             f"[merged]split=2[m1][m2];"
             f"[m2]crop={w}:{bH}:0:{bTop},boxblur=15:5[sub_blur];"
-            f"[m1][sub_blur]overlay=0:{bTop}[final]"
+            f"[m1][sub_blur]overlay=0:{bTop},format=yuv420p[final]"
         )
 
-        # Rendering Engine
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-i", input_video,
             "-filter_complex", filter_complex,
@@ -99,12 +93,8 @@ async def render_video(
             output_video
         ]
         
-        # Error အတိအကျကို သိရှိရန် stdout ဖြင့် ဖမ်းယူမည်
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if process.returncode != 0:
-            # Error log ကို console တွင် ပြမည်
-            print("FFmpeg Error Output:", process.stderr) 
-            # Error နောက်ဆုံးစာကြောင်းများကိုသာ ထုတ်ပြမည်
             error_msg = process.stderr.split('\n')[-5:] 
             raise Exception(f"FFmpeg Failed: {' '.join(error_msg)}")
 
