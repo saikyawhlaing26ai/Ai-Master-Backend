@@ -13,11 +13,11 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "AI Master Backend Engine V6 (Even Number Fix) is Running!"}
+    return {"status": "AI Master Backend Engine V7 (Final Bulletproof Fix) is Running!"}
 
-# မဂဏန်းများကို စုံကိန်း (Even Number) အဖြစ် အလိုအလျောက် ပြောင်းပေးမည့် Function
+# Error မတက်စေရန် စုံကိန်းများအဖြစ် အမြဲထိန်းပေးမည့် Function
 def make_even(n):
-    return int(n) // 2 * 2
+    return max(2, int(n) // 2 * 2)
 
 @app.post("/render")
 async def render_video(
@@ -52,27 +52,36 @@ async def render_video(
         
         bg_filter = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=15:15"
         
+        # FFmpeg Out of Bounds Error မတက်စေရန် Safe Crop Formula အသစ်
         fg_crop_filter = ""
         if inner_crop != "none":
-            if inner_crop == "3:4": fg_crop_filter = "crop=ih*3/4:ih,"
-            elif inner_crop == "16:9": fg_crop_filter = "crop=ih*16/9:ih,"
-            elif inner_crop == "1:1": fg_crop_filter = "crop=min(iw\\,ih):min(iw\\,ih),"
-            elif inner_crop == "4:5": fg_crop_filter = "crop=ih*4/5:ih,"
-            elif inner_crop == "9:16": fg_crop_filter = "crop=ih*9/16:ih,"
+            r_val = 1.0
+            if inner_crop == "3:4": r_val = 3.0/4.0
+            elif inner_crop == "16:9": r_val = 16.0/9.0
+            elif inner_crop == "1:1": r_val = 1.0
+            elif inner_crop == "4:5": r_val = 4.0/5.0
+            elif inner_crop == "9:16": r_val = 9.0/16.0
+            
+            # min(iw, ih) ကိုသုံး၍ မူရင်းဗီဒီယိုထက် ကျော်လွန်ဖြတ်တောက်ခြင်းကို တားဆီးထားသည်
+            fg_crop_filter = f"crop='floor(min(iw,ih*{r_val})/2)*2':'floor(min(ih,iw/{r_val})/2)*2',"
 
-        # Zoom တွက်ချက်မှုကြောင့် ထွက်လာမည့် Pixels များကို စုံကိန်းဖြစ်အောင် ထိန်းပေးခြင်း
         fg_w = make_even(w * zoom)
         fg_h = make_even(h * zoom)
         
         fg_filter = f"{flip_filter}{color_filter},{fg_crop_filter}scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease"
         
-        # Blur ဧရိယာ တွက်ချက်မှုကို စုံကိန်းဖြစ်အောင် ထိန်းပေးခြင်း
         bY = int((blur_pos / 100.0) * h)
         bH = make_even(blur_height)
         bTop = make_even(max(0, bY - (bH // 2)))
+        
+        # Blur Band သည် Canvas အပြင်ဘက်သို့ ရောက်မသွားစေရန် ထိန်းချုပ်ခြင်း
+        if bTop + bH > h:
+            bH = make_even(h - bTop)
+        if bH <= 0:
+            bH = 2
+
         safe_pan = make_even(pan_y)
 
-        # format=yuv420p ကို ထည့်သွင်းပေးခြင်းဖြင့် FFmpeg အရောင်စနစ် Error မတက်စေရန် ကာကွယ်ခြင်း
         filter_complex = (
             f"[0:v]split=2[bg_src][fg_src];"
             f"[bg_src]{bg_filter}[bg];"
