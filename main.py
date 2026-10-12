@@ -13,14 +13,23 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "AI Master Backend Engine V2 (Real Blur & AI Ready) is Running!"}
+    return {"status": "AI Master Backend Engine V3 (Full UI Control) is Running!"}
 
 @app.post("/render")
 async def render_video(
     video: UploadFile = File(...),
-    gemini_key: str = Form(...),
+    gemini_key: str = Form(None),
     tts_voice: str = Form("male"),
-    blur_pos: int = Form(85)
+    ratio: str = Form("9:16"),
+    inner_crop: str = Form("none"),
+    blur_pos: int = Form(85),
+    blur_height: int = Form(120),
+    flip: str = Form("false"),
+    zoom: float = Form(1.0),
+    pan_y: int = Form(0),
+    bri: int = Form(100),
+    con: int = Form(100),
+    sat: int = Form(100)
 ):
     task_id = str(uuid.uuid4())[:8]
     input_video = f"temp_in_{task_id}.mp4"
@@ -30,33 +39,65 @@ async def render_video(
     with open(input_video, "wb") as f:
         f.write(await video.read())
 
-    # ==========================================
-    # (ယခုနေရာတွင် STT / Gemini / TTS API ချိတ်ဆက်မည့်
-    # AI Processing Code များကို နောက်တစ်ဆင့်တွင် ဆက်ရေးပါမည်)
-    # ==========================================
+    # ၂။ Canvas Ratio သတ်မှတ်ခြင်း (W:H)
+    w, h = 720, 1280
+    if ratio == "16:9":
+        w, h = 1280, 720
+    elif ratio == "1:1":
+        w, h = 1080, 1080
+
+    # ၃။ Color, Flip, Zoom, Pan သတ်မှတ်ခြင်း
+    color_filter = f"eq=brightness={(bri-100)/100}:contrast={con/100}:saturation={sat/100}"
+    flip_filter = "hflip," if flip.lower() == "true" else ""
     
-    # ၉:၁၆ ဘောင်အတွင်း Background Blur ပြုလုပ်ခြင်း နှင့် စာတန်းကို BoxBlur အစစ်ဖြင့် ဖျောက်ခြင်း
-    blur_y = int((blur_pos / 100) * 1280)
+    # ၄။ Inner Crop & Scale သတ်မှတ်ခြင်း
+    # (ဤအပိုင်းသည် ရှုပ်ထွေးနိုင်သဖြင့် လောလောဆယ်တွင် UI ၏ Scale/Crop အတိုင်း အနီးစပ်ဆုံး ဖြစ်အောင် ရေးထားပါသည်)
+    # Background Blur အတွက်
+    bg_filter = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=15:15"
     
-    # Advanced FFmpeg Filter (Fit + Background Blur + Subtitle Real Blur)
+    # Foreground အတွက် Inner Crop ကို တွက်ချက်ခြင်း (ခန့်မှန်းခြေ)
+    fg_crop_filter = ""
+    if inner_crop != "none":
+        # ဥပမာ - 3:4 ဆိုလျှင် w:h အချိုးကို တွက်ချက်၍ crop လုပ်မည်
+        if inner_crop == "3:4":
+            fg_crop_filter = "crop=ih*3/4:ih,"
+        elif inner_crop == "16:9":
+            fg_crop_filter = "crop=iw:iw*9/16,"
+        elif inner_crop == "1:1":
+            fg_crop_filter = "crop=min(iw\\,ih):min(iw\\,ih),"
+        elif inner_crop == "4:5":
+            fg_crop_filter = "crop=ih*4/5:ih,"
+        elif inner_crop == "9:16":
+             fg_crop_filter = "crop=ih*9/16:ih,"
+
+    fg_filter = f"{flip_filter}{color_filter},{fg_crop_filter}scale={w*zoom}:{h*zoom}:force_original_aspect_ratio=decrease"
+    
+    # ၅။ Blur Position တွက်ချက်ခြင်း
+    bY = int((blur_pos / 100) * h)
+    bH = blur_height
+    bTop = max(0, bY - (bH // 2))
+
+    # ၆။ FFmpeg Filter Complex ရေးဆွဲခြင်း
     filter_complex = (
-        f"[0:v]split=2[bg][fg];"
-        f"[bg]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=25:25[bg_blurred];"
-        f"[fg]scale=720:1280:force_original_aspect_ratio=decrease[fg_scaled];"
-        f"[bg_blurred][fg_scaled]overlay=(W-w)/2:(H-h)/2[merged];"
+        f"[0:v]split=2[bg_src][fg_src];"
+        f"[bg_src]{bg_filter}[bg];"
+        f"[fg_src]{fg_filter}[fg];"
+        # Background နှင့် Foreground ကို ပေါင်းခြင်း (Pan Y ကိုပါ ထည့်သွင်းစဉ်းစားသည်)
+        f"[bg][fg]overlay=(W-w)/2:((H-h)/2)+{pan_y}[merged];"
         f"[merged]split=2[m1][m2];"
-        f"[m2]crop=720:120:0:{blur_y-60},boxblur=15:5[sub_blur];"
-        f"[m1][sub_blur]overlay=0:{blur_y-60}[final]"
+        # Blur Band ပြုလုပ်ခြင်း
+        f"[m2]crop={w}:{bH}:0:{bTop},boxblur=15:5[sub_blur];"
+        f"[m1][sub_blur]overlay=0:{bTop}[final]"
     )
 
     try:
-        # Rendering Engine
+        # Rendering Engine (ပိုမြန်အောင် ultrafast သုံးထားသည်)
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-i", input_video,
             "-filter_complex", filter_complex,
             "-map", "[final]",
-            "-map", "0:a?", # ယာယီအားဖြင့် မူရင်းအသံကို အရင်ပြန်ထည့်ထားမည် (နောက်တစ်ဆင့်တွင် TTS ဖြင့် အစားထိုးမည်)
-            "-c:v", "libx264", "-preset", "fast",
+            "-map", "0:a?", 
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", # မြန်ဆန်စေရန်
             "-c:a", "aac",
             output_video
         ]
@@ -67,4 +108,8 @@ async def render_video(
     
     except Exception as e:
         return {"error": str(e)}
-
+    finally:
+        # ယာယီဖိုင်များကို ရှင်းလင်းခြင်း (Storage မပြည့်စေရန်)
+        if os.path.exists(input_video):
+            os.remove(input_video)
+        # output_video ကို FileResponse က ပြီးမှ ရှင်းလင်းမည်ဖြစ်၍ ဤနေရာတွင် မဖျက်ပါ
