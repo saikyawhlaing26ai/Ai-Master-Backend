@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import subprocess
 import uuid
-import urllib.request
 
 app = FastAPI()
 
@@ -12,24 +11,18 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-# Render.com တွင် စာသားပေါ်စေရန် မြန်မာဖောင့် အလိုအလျောက် ရယူခြင်း
-font_path = "myanmar.ttf"
-if not os.path.exists(font_path):
-    try:
-        urllib.request.urlretrieve("https://github.com/googlefonts/noto-fonts/raw/main/unhinted/ttf/NotoSansMyanmar/NotoSansMyanmar-Bold.ttf", font_path)
-    except:
-        pass
+@app.get("/")
+def home():
+    return {"status": "AI Master Backend Engine V8 (Final Fast Render) is Running!"}
 
 def make_even(n):
     return max(2, int(n) // 2 * 2)
 
-@app.get("/")
-def home():
-    return {"status": "AI Master V9 (Fast Render + Text + Color Fix) is Running!"}
-
 @app.post("/render")
 async def render_video(
     video: UploadFile = File(...),
+    gemini_key: str = Form(None),
+    tts_voice: str = Form("male"),
     ratio: str = Form("9:16"),
     inner_crop: str = Form("none"),
     blur_pos: int = Form(85),
@@ -40,6 +33,7 @@ async def render_video(
     bri: int = Form(100),
     con: int = Form(100),
     sat: int = Form(100),
+    # UI မှ စာသား၊ နေရာနှင့် အရွယ်အစားများကို လက်ခံရန် (index.html တွင် ထပ်မံဖြည့်စွက်ရန်လိုမည်)
     recap_text: str = Form(""),
     text_pos: int = Form(90),
     text_size: int = Form(40),
@@ -53,19 +47,21 @@ async def render_video(
         f.write(await video.read())
 
     try:
-        w, h = 720, 1280
-        if ratio == "16:9": w, h = 1280, 720
-        elif ratio == "1:1": w, h = 1080, 1080
+        # Render မြန်စေရန် Output Resolution ကို အနည်းငယ် လျှော့ချထားသည် (540x960 ဖြင့် စမ်းသပ်ကြည့်ပါ)
+        # အကယ်၍ ကြည်လင်ပြတ်သားမှု လိုအပ်ပါက 720x1280 သို့ ပြန်ပြောင်းနိုင်သည်
+        w, h = 540, 960 
+        if ratio == "16:9": w, h = 960, 540
+        elif ratio == "1:1": w, h = 720, 720
 
-        # ၁။ အရောင် (Color) ပြင်ဆင်ချက်
-        b_val = (bri - 100) / 100.0
-        c_val = max(0.1, con / 100.0)
-        s_val = max(0.0, sat / 100.0)
-        color_filter = f"eq=brightness={b_val:.2f}:contrast={c_val:.2f}:saturation={s_val:.2f}"
+        # အရောင်ပြောင်းခြင်းကို သေချာစေရန် (brightness သည် -1.0 မှ 1.0, contrast သည် -2.0 မှ 2.0 အစရှိသဖြင့်)
+        b_val = (bri - 100) / 100.0  # 0.0 သည် ပုံမှန်
+        c_val = con / 100.0          # 1.0 သည် ပုံမှန်
+        s_val = sat / 100.0          # 1.0 သည် ပုံမှန်
+        color_filter = f"eq=brightness={b_val}:contrast={c_val}:saturation={s_val}"
+        
         flip_filter = "hflip," if flip.lower() == "true" else ""
         
-        # ၂။ အမြန်နှုန်း (Speed) ပြင်ဆင်ချက် - Background ကို ၄ ဆ သေးပြီးမှ Blur လုပ်မည်
-        bg_filter = f"scale={w//2}:{h//2}:force_original_aspect_ratio=increase,crop={w//2}:{h//2},boxblur=8:8,scale={w}:{h}"
+        bg_filter = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=15:15"
         
         fg_crop_filter = ""
         if inner_crop != "none":
@@ -75,29 +71,36 @@ async def render_video(
             elif inner_crop == "1:1": r_val = 1.0
             elif inner_crop == "4:5": r_val = 4.0/5.0
             elif inner_crop == "9:16": r_val = 9.0/16.0
+            
             fg_crop_filter = f"crop='floor(min(iw,ih*{r_val})/2)*2':'floor(min(ih,iw/{r_val})/2)*2',"
 
         fg_w = make_even(w * zoom)
         fg_h = make_even(h * zoom)
+        
+        # Foreground ကို Color Filter ထည့်သွင်းခြင်း
         fg_filter = f"{flip_filter}{color_filter},{fg_crop_filter}scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease"
         
         bY = int((blur_pos / 100.0) * h)
         bH = make_even(blur_height)
         bTop = make_even(max(0, bY - (bH // 2)))
-        if bTop + bH > h: bH = make_even(h - bTop)
-        if bH <= 0: bH = 2
+        
+        if bTop + bH > h:
+            bH = make_even(h - bTop)
+        if bH <= 0:
+            bH = 2
+
         safe_pan = make_even(pan_y)
 
-        # ၃။ စာသား (Text) ပြင်ဆင်ချက်
+        # စာသား (Subtitle) ရေးသားရန် (drawtext filter အသုံးပြုသည်)
+        # Font ဖိုင်မရှိပါက default font ကိုသာ သုံးမည်
         tY = int((text_pos / 100.0) * h)
         text_filter = ""
         if recap_text:
-            safe_text = recap_text.replace("'", "").replace(":", "\\:").replace("\n", " ")
-            tc = text_color.replace("#", "0x")
-            if os.path.exists(font_path):
-                text_filter = f",drawtext=fontfile='{font_path}':text='{safe_text}':fontcolor={tc}:fontsize={text_size}:x=(w-text_w)/2:y={tY}:bordercolor=black:borderw=2"
-            else:
-                text_filter = f",drawtext=text='{safe_text}':fontcolor={tc}:fontsize={text_size}:x=(w-text_w)/2:y={tY}:bordercolor=black:borderw=2"
+             # FFmpeg drawtext တွင် အသုံးပြုရန် escape လုပ်ခြင်း
+             safe_text = recap_text.replace("'", "\\'").replace(":", "\\:")
+             t_color = text_color.replace("#", "0x")
+             # drawtext ဖြင့် စာသားထည့်ခြင်း
+             text_filter = f",drawtext=text='{safe_text}':fontcolor={t_color}:fontsize={text_size}:x=(w-text_w)/2:y={tY}:borderw=2:bordercolor=black"
 
         filter_complex = (
             f"[0:v]split=2[bg_src][fg_src];"
@@ -109,13 +112,14 @@ async def render_video(
             f"[m1][sub_blur]overlay=0:{bTop}{text_filter},format=yuv420p[final]"
         )
 
-        # အမြန်ဆုံး Render ဖြစ်ရန် Optimize လုပ်ထားသည် (-threads 0, ultrafast, fastdecode)
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-i", input_video,
             "-filter_complex", filter_complex,
             "-map", "[final]",
             "-map", "0:a?", 
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-tune", "fastdecode", "-threads", "0", 
+            "-c:v", "libx264", 
+            "-preset", "ultrafast", # အမြန်ဆုံး Render လုပ်ရန်
+            "-crf", "30", # File size သေးအောင် ချိန်ညှိခြင်း (မြန်စေရန်)
             "-c:a", "aac",
             output_video
         ]
@@ -125,9 +129,10 @@ async def render_video(
             error_msg = process.stderr.split('\n')[-5:] 
             raise Exception(f"FFmpeg Failed: {' '.join(error_msg)}")
 
-        return FileResponse(output_video, media_type="video/mp4", filename=f"AiMaster_Final_{task_id}.mp4")
+        return FileResponse(output_video, media_type="video/mp4", filename=f"AiMaster_Rendered_{task_id}.mp4")
     
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
-        if os.path.exists(input_video): os.remove(input_video)
+        if os.path.exists(input_video):
+            os.remove(input_video)
