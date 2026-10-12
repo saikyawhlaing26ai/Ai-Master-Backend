@@ -13,9 +13,8 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "AI Master Backend Engine V7 (Final Bulletproof Fix) is Running!"}
+    return {"status": "AI Master Backend Engine V8 (Final Optimized) is Running!"}
 
-# Error မတက်စေရန် စုံကိန်းများအဖြစ် အမြဲထိန်းပေးမည့် Function
 def make_even(n):
     return max(2, int(n) // 2 * 2)
 
@@ -33,11 +32,16 @@ async def render_video(
     pan_y: int = Form(0),
     bri: int = Form(100),
     con: int = Form(100),
-    sat: int = Form(100)
+    sat: int = Form(100),
+    recap_text: str = Form(""), # စာသားအတွက် အသစ်
+    text_pos: int = Form(90),    # စာသားနေရာ
+    text_size: int = Form(40),   # စာသားအရွယ်အစား
+    text_color: str = Form("#FFDE00") # စာသားအရောင်
 ):
     task_id = str(uuid.uuid4())[:8]
     input_video = f"temp_in_{task_id}.mp4"
     output_video = f"temp_out_{task_id}.mp4"
+    # ဖောင့်ဖိုင် လိုအပ်ပါက ဆာဗာတွင်ရှိသော နေရာကို ညွှန်းရမည်။ (လောလောဆယ် default font သုံးထားသည်)
 
     with open(input_video, "wb") as f:
         f.write(await video.read())
@@ -47,12 +51,17 @@ async def render_video(
         if ratio == "16:9": w, h = 1280, 720
         elif ratio == "1:1": w, h = 1080, 1080
 
-        color_filter = f"eq=brightness={(bri-100)/100.0}:contrast={con/100.0}:saturation={sat/100.0}"
+        # ၁။ အရောင်ချိန်ခြင်း (FFmpeg Formula မှန်ကန်စေရန် ပြင်ဆင်ထားသည်)
+        # Brightness: -1.0 to 1.0 (default 0), Contrast: -2.0 to 2.0 (default 1), Saturation: 0.0 to 3.0 (default 1)
+        b_val = (bri - 100) / 100.0 
+        c_val = max(-2.0, min(2.0, con / 100.0))
+        s_val = max(0.0, min(3.0, sat / 100.0))
+        color_filter = f"eq=brightness={b_val}:contrast={c_val}:saturation={s_val}"
+        
         flip_filter = "hflip," if flip.lower() == "true" else ""
         
         bg_filter = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=15:15"
         
-        # FFmpeg Out of Bounds Error မတက်စေရန် Safe Crop Formula အသစ်
         fg_crop_filter = ""
         if inner_crop != "none":
             r_val = 1.0
@@ -61,8 +70,6 @@ async def render_video(
             elif inner_crop == "1:1": r_val = 1.0
             elif inner_crop == "4:5": r_val = 4.0/5.0
             elif inner_crop == "9:16": r_val = 9.0/16.0
-            
-            # min(iw, ih) ကိုသုံး၍ မူရင်းဗီဒီယိုထက် ကျော်လွန်ဖြတ်တောက်ခြင်းကို တားဆီးထားသည်
             fg_crop_filter = f"crop='floor(min(iw,ih*{r_val})/2)*2':'floor(min(ih,iw/{r_val})/2)*2',"
 
         fg_w = make_even(w * zoom)
@@ -74,13 +81,23 @@ async def render_video(
         bH = make_even(blur_height)
         bTop = make_even(max(0, bY - (bH // 2)))
         
-        # Blur Band သည် Canvas အပြင်ဘက်သို့ ရောက်မသွားစေရန် ထိန်းချုပ်ခြင်း
-        if bTop + bH > h:
-            bH = make_even(h - bTop)
-        if bH <= 0:
-            bH = 2
+        if bTop + bH > h: bH = make_even(h - bTop)
+        if bH <= 0: bH = 2
 
         safe_pan = make_even(pan_y)
+
+        # ၂။ စာသားထည့်ခြင်း (drawtext filter)
+        # text_color က '#FFDE00' ပုံစံလာမည်ဖြစ်ရာ FFmpeg အတွက် အဆင်ပြေစေရန်
+        tY = int((text_pos / 100.0) * h)
+        # ယာယီစာသားအတွက် Escape characters ထည့်ခြင်း
+        safe_text = recap_text.replace("'", "").replace(":", "\\:").replace("\n", " ") if recap_text else "Preview Text"
+        
+        # drawtext filter ကိုပေါင်းထည့်ခြင်း
+        # မှတ်ချက် - ဆာဗာတွင် မြန်မာဖောင့် မရှိပါက လေးထောင့်တုံးများပေါ်နိုင်ပါသည်။ 
+        # (တကယ့်အလုပ်လုပ်မည့်အခါ Subtitle File (.srt) ဖြင့် burn ရန် ပိုကောင်းပါသည်)
+        text_filter = ""
+        if recap_text:
+            text_filter = f",drawtext=text='{safe_text}':fontcolor={text_color}:fontsize={text_size}:x=(w-text_w)/2:y={tY}:bordercolor=black:borderw=2"
 
         filter_complex = (
             f"[0:v]split=2[bg_src][fg_src];"
@@ -89,15 +106,20 @@ async def render_video(
             f"[bg][fg]overlay=(W-w)/2:((H-h)/2)+({safe_pan})[merged];"
             f"[merged]split=2[m1][m2];"
             f"[m2]crop={w}:{bH}:0:{bTop},boxblur=15:5[sub_blur];"
-            f"[m1][sub_blur]overlay=0:{bTop},format=yuv420p[final]"
+            f"[m1][sub_blur]overlay=0:{bTop}{text_filter},format=yuv420p[final]"
         )
 
+        # ၃။ Render မြန်အောင် Optimization များကို ထည့်သွင်းခြင်း (-threads 0, -tune fastdecode)
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-i", input_video,
             "-filter_complex", filter_complex,
             "-map", "[final]",
             "-map", "0:a?", 
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-c:v", "libx264", 
+            "-preset", "ultrafast", 
+            "-crf", "28",
+            "-tune", "fastdecode", 
+            "-threads", "0", 
             "-c:a", "aac",
             output_video
         ]
